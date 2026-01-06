@@ -28,8 +28,9 @@ STATION_ID = 61747634
 BASE_URL = "https://eu1-developer.deyecloud.com"
 
 # ================== TELEGRAM ==================
-TELEGRAM_TOKEN = "8466043486:AAHJJkoZnOmlMPop7vNWFpgSTsxXxfFZhLU"
+import os
 
+TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 # ================== ЛІМІТ ==================
 MAX_CLICKS_PER_HOUR = 4
 user_clicks = {}
