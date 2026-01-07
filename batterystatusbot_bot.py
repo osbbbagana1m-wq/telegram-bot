@@ -20,22 +20,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ================== CONFIG ==================
-APP_SECRET = "6afcf4009f601eca123075b848da52f3"
-APP_ID = "202601068634010"
-EMAIL = "Osbb.bagana1m@gmail.com"
-PASSWORD = "M1ybagana1m"
-STATION_ID = 61747634
+# ================== ENV CONFIG ==================
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+
+APP_SECRET = os.getenv("DEYE_APP_SECRET")
+APP_ID = os.getenv("DEYE_APP_ID")
+EMAIL = os.getenv("DEYE_EMAIL")
+PASSWORD = os.getenv("DEYE_PASSWORD")
+STATION_ID = int(os.getenv("DEYE_STATION_ID"))
+
 BASE_URL = "https://eu1-developer.deyecloud.com:443"
 
-TELEGRAM_TOKEN = "8466043486:AAHJJkoZnOmlMPop7vNWFpgSTsxXxfFZhLU"
-
 MAX_CLICKS_PER_HOUR = 4
-user_clicks = {}
-
 BUTTON_TEXT = "🔋 Рівень батареї | Ліфти"
 STATION_NAME = "Бажана 1М"
 
+user_clicks = {}
 
 # ================== HELPERS ==================
 def sha256(text: str) -> str:
@@ -67,16 +67,10 @@ def get_deye_token() -> str | None:
     try:
         r = requests.post(url, json=payload, timeout=10)
         data = r.json()
-        token = data.get("accessToken")
-
-        if token:
-            return token
-
-        logger.error(f"Token error: {data}")
-        return None
+        return data.get("accessToken")
 
     except Exception as e:
-        logger.error(f"Token exception: {e}")
+        logger.error(f"Deye token error: {e}")
         return None
 
 
@@ -94,17 +88,14 @@ def get_battery_soc() -> float | None:
         data = r.json()
 
         if not data.get("success"):
-            logger.error(f"Station error: {data}")
+            logger.error(f"Deye data error: {data}")
             return None
 
         soc = data.get("batterySOC")
-        if soc is None:
-            return None
-
-        return float(soc)
+        return float(soc) if soc is not None else None
 
     except Exception as e:
-        logger.error(f"Station exception: {e}")
+        logger.error(f"Deye request error: {e}")
         return None
 
 
@@ -114,8 +105,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
     await update.message.reply_text(
-        "👋 <b>Вітаю!</b>\n\n"
-        "Натисни кнопку нижче, щоб дізнатись рівень батареї.",
+        "👋 <b>Вітаю!</b>\n\nНатисни кнопку, щоб дізнатись рівень батареї.",
         reply_markup=reply_markup,
         parse_mode="HTML",
     )
@@ -129,16 +119,13 @@ async def get_battery(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     user_clicks[user_id] = [t for t in user_clicks[user_id] if now - t < 3600]
 
     if len(user_clicks[user_id]) >= MAX_CLICKS_PER_HOUR:
-        wait = int(3600 - (now - user_clicks[user_id][0])) // 60
         await update.message.reply_text(
-            f"⏳ <b>Ліміт вичерпано</b>\n\n"
-            f"Спробуй ще раз приблизно через {wait} хв.",
+            "⏳ <b>Ліміт вичерпано</b>\nСпробуй пізніше.",
             parse_mode="HTML",
         )
         return
 
     user_clicks[user_id].append(now)
-
     await update.message.reply_text("⏳ Отримую дані...")
 
     soc = get_battery_soc()
@@ -149,10 +136,8 @@ async def get_battery(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
-    status_text = format_battery_status(soc)
-
     message = (
-        f"{status_text}\n\n"
+        f"{format_battery_status(soc)}\n\n"
         f"🔋 <b>Заряд:</b> {soc}%\n"
         f"📍 <b>Станція:</b> {STATION_NAME}"
     )
@@ -168,7 +153,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 # ================== MAIN ==================
 def main() -> None:
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
