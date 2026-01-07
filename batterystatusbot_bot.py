@@ -20,17 +20,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ================== ENV CONFIG ==================
+# ================== ENV VARIABLES ==================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-
 APP_SECRET = os.getenv("DEYE_APP_SECRET")
 APP_ID = os.getenv("DEYE_APP_ID")
 EMAIL = os.getenv("DEYE_EMAIL")
 PASSWORD = os.getenv("DEYE_PASSWORD")
-STATION_ID = int(os.getenv("DEYE_STATION_ID"))
+
+STATION_ID_RAW = os.getenv("DEYE_STATION_ID")
+if not STATION_ID_RAW:
+    raise RuntimeError("DEYE_STATION_ID is not set in Environment Variables")
+
+STATION_ID = int(STATION_ID_RAW)
 
 BASE_URL = "https://eu1-developer.deyecloud.com:443"
 
+# ================== CONFIG ==================
 MAX_CLICKS_PER_HOUR = 4
 BUTTON_TEXT = "🔋 Рівень батареї | Ліфти"
 STATION_NAME = "Бажана 1М"
@@ -52,7 +57,7 @@ def format_battery_status(soc: float) -> str:
     elif soc >= 15:
         return "🔴 <b>Критично</b> — краще пішки. Серйозно."
     else:
-        return "⚪️ <b>Нульовий шанс</b> — все… розходимось."
+        return "⚪️ <b>Все</b> — вистава закінчена."
 
 
 # ================== DEYE API ==================
@@ -68,7 +73,6 @@ def get_deye_token() -> str | None:
         r = requests.post(url, json=payload, timeout=10)
         data = r.json()
         return data.get("accessToken")
-
     except Exception as e:
         logger.error(f"Deye token error: {e}")
         return None
@@ -88,7 +92,7 @@ def get_battery_soc() -> float | None:
         data = r.json()
 
         if not data.get("success"):
-            logger.error(f"Deye data error: {data}")
+            logger.error(f"Deye API error: {data}")
             return None
 
         soc = data.get("batterySOC")
@@ -120,7 +124,7 @@ async def get_battery(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if len(user_clicks[user_id]) >= MAX_CLICKS_PER_HOUR:
         await update.message.reply_text(
-            "⏳ <b>Ліміт вичерпано</b>\nСпробуй пізніше.",
+            "⏳ <b>Ліміт запитів вичерпано</b>\nСпробуй пізніше.",
             parse_mode="HTML",
         )
         return
@@ -131,7 +135,7 @@ async def get_battery(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     soc = get_battery_soc()
     if soc is None:
         await update.message.reply_text(
-            "❌ <b>Не вдалось отримати дані з Deye</b>",
+            "❌ <b>Не вдалося отримати дані з Deye</b>",
             parse_mode="HTML",
         )
         return
@@ -153,24 +157,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 # ================== MAIN ==================
 def main() -> None:
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    logger.info("🤖 Bot started")
-    def main() -> None:
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     logger.info("🤖 Bot started")
 
-    # 🔥 гарантія, що нема іншого інстансу
     app.run_polling(
         drop_pending_updates=True,
         allowed_updates=Update.ALL_TYPES,
     )
-
 
 
 if __name__ == "__main__":
