@@ -1,10 +1,14 @@
+# ===== IMPORTS (НА САМОМУ ПОЧАТКУ) =====
 import logging
 import requests
 import hashlib
-import time
 import os
+import time
 
-from telegram import Update, ReplyKeyboardMarkup
+from telegram import (
+    Update,
+    ReplyKeyboardMarkup,
+)
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -12,6 +16,14 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+
+# ===== ENV VARIABLES =====
+APP_ID = os.getenv("DEYE_APP_ID")
+APP_SECRET = os.getenv("DEYE_APP_SECRET")
+EMAIL = os.getenv("DEYE_EMAIL")
+PASSWORD = os.getenv("DEYE_PASSWORD")
+STATION_ID = int(os.getenv("DEYE_STATION_ID"))
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
 # ================== LOGGING ==================
 logging.basicConfig(
@@ -91,12 +103,19 @@ def get_battery_soc() -> float | None:
         r = requests.post(url, json=payload, headers=headers, timeout=10)
         data = r.json()
 
+        logger.info(f"Deye RAW response: {data}")
+
         if not data.get("success"):
-            logger.error(f"Deye API error: {data}")
             return None
 
-        soc = data.get("batterySOC")
-        return float(soc) if soc is not None else None
+        # 👇 найчастіші варіанти
+        if "batterySOC" in data:
+            return float(data["batterySOC"])
+
+        if "data" in data and "batterySOC" in data["data"]:
+            return float(data["data"]["batterySOC"])
+
+        return None
 
     except Exception as e:
         logger.error(f"Deye request error: {e}")
