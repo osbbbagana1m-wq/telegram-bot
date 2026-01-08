@@ -4,11 +4,7 @@ import requests
 import hashlib
 import os
 import time
-
-from telegram import (
-    Update,
-    ReplyKeyboardMarkup,
-)
+from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
