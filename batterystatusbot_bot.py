@@ -9,11 +9,10 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
-# Налаштування логування
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Дані з Koyeb
+# ENV
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 APP_ID = os.getenv("DEYE_APP_ID")
 APP_SECRET = os.getenv("DEYE_APP_SECRET")
@@ -21,13 +20,15 @@ EMAIL = os.getenv("DEYE_EMAIL")
 PASSWORD = os.getenv("DEYE_PASSWORD")
 STATION_ID_1 = os.getenv("DEYE_STATION_ID")
 STATION_ID_2 = os.getenv("STATION_ID_2")
-NOTIFY_CHAT_ID = os.getenv("NOTIFY_CHAT_ID") # ID каналу/групи для сповіщень
+NOTIFY_CHAT_ID = os.getenv("NOTIFY_CHAT_ID")
+
+# ID ТЕМИ: Теплопостачання/Електрика
+THREAD_ID = 12813 
 
 BASE_URL = "https://eu1-developer.deyecloud.com:443"
 BTN_LIFTS = "🔋 Ліфти"
 BTN_PUMPS = "🚰 Насоси (ГВП/Опалення)"
 
-# Словник для відстеження відправлених сповіщень (щоб не спамити)
 sent_alerts = {"LIFTS": set(), "PUMPS": set()}
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -66,64 +67,46 @@ def get_battery_soc(station_id):
         return None
     except: return None
 
-def format_alert_message(sys_name, soc):
-    status_icon = "🟢" if soc > 60 else "🟡" if soc > 30 else "🟠" if soc > 20 else "🔴"
-    importance = "⚠️ <b>УВАГА! НИЗЬКИЙ ЗАРЯД</b>" if soc <= 20 else "ℹ️ <b>Інформаційне сповіщення</b>"
-    
-    return (
-        f"{importance}\n\n"
-        f"📍 Система: <b>{sys_name}</b>\n"
-        f"{status_icon} <b>Заряд батареї: {soc}%</b>\n"
-        f"________________\n"
-        f"Перевірте стан системи!"
-    )
-
 async def check_alerts(app):
-    """Фонова задача для перевірки порогів заряду"""
     while True:
-        try:
-            # Перевірка ЛІФТІВ (50% та 20%)
-            soc_lifts = get_battery_soc(STATION_ID_1)
-            if soc_lifts is not None:
-                for threshold in [50, 20]:
-                    if soc_lifts <= threshold and threshold not in sent_alerts["LIFTS"]:
-                        await app.bot.send_message(NOTIFY_CHAT_ID, format_alert_message("ЛІФТИ", soc_lifts), parse_mode="HTML")
-                        sent_alerts["LIFTS"].add(threshold)
-                    elif soc_lifts > threshold + 5: # Скидання прапорця, якщо зарядили
-                        sent_alerts["LIFTS"].discard(threshold)
+        if NOTIFY_CHAT_ID and "-" in str(NOTIFY_CHAT_ID):
+            try:
+                # ЛІФТИ (50, 20)
+                soc1 = get_battery_soc(STATION_ID_1)
+                if soc1 is not None:
+                    for tr in [50, 20]:
+                        if soc1 <= tr and tr not in sent_alerts["LIFTS"]:
+                            text = f"⚠️ <b>ЛІФТИ</b>\n{'🟡' if tr==50 else '🔴'} Заряд: <b>{soc1}%</b>"
+                            await app.bot.send_message(NOTIFY_CHAT_ID, text, message_thread_id=THREAD_ID, parse_mode="HTML")
+                            sent_alerts["LIFTS"].add(tr)
+                        elif soc1 > tr + 5: sent_alerts["LIFTS"].discard(tr)
 
-            # Перевірка НАСОСІВ (60% та 20%)
-            soc_pumps = get_battery_soc(STATION_ID_2)
-            if soc_pumps is not None:
-                for threshold in [72, 20]:
-                    if soc_pumps <= threshold and threshold not in sent_alerts["PUMPS"]:
-                        await app.bot.send_message(NOTIFY_CHAT_ID, format_alert_message("НАСОСИ", soc_pumps), parse_mode="HTML")
-                        sent_alerts["PUMPS"].add(threshold)
-                    elif soc_pumps > threshold + 5:
-                        sent_alerts["PUMPS"].discard(threshold)
-
-        except Exception as e:
-            logger.error(f"Alert check error: {e}")
-        
-        await asyncio.sleep(600) # Перевірка кожні 10 хвилин
+                # НАСОСИ (60, 20)
+                soc2 = get_battery_soc(STATION_ID_2)
+                if soc2 is not None:
+                    for tr in [60, 20]:
+                        if soc2 <= tr and tr not in sent_alerts["PUMPS"]:
+                            text = f"⚠️ <b>НАСОСИ</b>\n{'🟡' if tr==60 else '🔴'} Заряд: <b>{soc2}%</b>"
+                            await app.bot.send_message(NOTIFY_CHAT_ID, text, message_thread_id=THREAD_ID, parse_mode="HTML")
+                            sent_alerts["PUMPS"].add(tr)
+                        elif soc2 > tr + 5: sent_alerts["PUMPS"].discard(tr)
+            except Exception as e: logger.error(f"Alert error: {e}")
+        await asyncio.sleep(600)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[BTN_LIFTS, BTN_PUMPS]]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    await update.message.reply_text("📟 <b>Виберіть систему:</b>", reply_markup=reply_markup, parse_mode="HTML")
+    await update.message.reply_text("📟 Виберіть систему:", reply_markup=reply_markup)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    if text not in [BTN_LIFTS, BTN_PUMPS]: return
+    if update.message.text not in [BTN_LIFTS, BTN_PUMPS]: return
     msg = await update.message.reply_text("🔄 Отримую дані...")
-    sid = STATION_ID_1 if text == BTN_LIFTS else STATION_ID_2
-    sys_name = "ЛІФТИ" if text == BTN_LIFTS else "НАСОСИ"
+    sid = STATION_ID_1 if update.message.text == BTN_LIFTS else STATION_ID_2
     soc = get_battery_soc(sid)
-    if soc is None:
-        await msg.edit_text(f"❌ Помилка отримання даних для: <b>{sys_name}</b>", parse_mode="HTML")
+    if soc is None: await msg.edit_text("❌ Помилка")
     else:
         icon = "🟢" if soc >= 50 else "🟡" if soc >= 20 else "🔴"
-        await msg.edit_text(f"📍 Система: <b>{sys_name}</b>\n{icon} <b>Заряд:</b> {soc}%", parse_mode="HTML")
+        await msg.edit_text(f"📍 <b>{update.message.text}</b>\n{icon} Заряд: {soc}%", parse_mode="HTML")
 
 def main():
     Thread(target=run_health_check, daemon=True).start()
@@ -131,10 +114,8 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    # Запуск фонової перевірки
     loop = asyncio.get_event_loop()
     loop.create_task(check_alerts(app))
-    
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
