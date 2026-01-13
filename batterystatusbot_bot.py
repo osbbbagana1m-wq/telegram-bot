@@ -95,7 +95,7 @@ async def check_alerts(app):
             # Перевірка НАСОСІВ (60% та 20%)
             soc_pumps = get_battery_soc(STATION_ID_2)
             if soc_pumps is not None:
-                for threshold in [60, 20]:
+                for threshold in [76, 20]:
                     if soc_pumps <= threshold and threshold not in sent_alerts["PUMPS"]:
                         await app.bot.send_message(NOTIFY_CHAT_ID, format_alert_message("НАСОСИ", soc_pumps), parse_mode="HTML")
                         sent_alerts["PUMPS"].add(threshold)
