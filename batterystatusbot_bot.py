@@ -84,7 +84,7 @@ async def check_alerts(app):
                 # НАСОСИ (60, 20)
                 soc2 = get_battery_soc(STATION_ID_2)
                 if soc2 is not None:
-                    for tr in [60, 20]:
+                    for tr in [65, 20]:
                         if soc2 <= tr and tr not in sent_alerts["PUMPS"]:
                             text = f"⚠️ <b>НАСОСИ</b>\n{'🟡' if tr==60 else '🔴'} Заряд: <b>{soc2}%</b>"
                             await app.bot.send_message(NOTIFY_CHAT_ID, text, message_thread_id=THREAD_ID, parse_mode="HTML")
