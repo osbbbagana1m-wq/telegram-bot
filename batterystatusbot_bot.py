@@ -2,7 +2,6 @@ import logging
 import requests
 import hashlib
 import os
-import time
 import asyncio
 from threading import Thread
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -38,7 +37,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"Bot is running")
 
 def run_health_check():
-    port = int(os.getenv("PORT", 8080))
+    port = int(os.getenv("PORT", 10000))
     HTTPServer(('0.0.0.0', port), HealthCheckHandler).serve_forever()
 
 def sha256(text: str) -> str:
@@ -81,12 +80,12 @@ async def check_alerts(app):
                             sent_alerts["LIFTS"].add(tr)
                         elif soc1 > tr + 5: sent_alerts["LIFTS"].discard(tr)
 
-                # НАСОСИ (60, 20)
+                # НАСОСИ (65, 20)
                 soc2 = get_battery_soc(STATION_ID_2)
                 if soc2 is not None:
                     for tr in [65, 20]:
                         if soc2 <= tr and tr not in sent_alerts["PUMPS"]:
-                            text = f"⚠️ <b>НАСОСИ</b>\n{'🟡' if tr==60 else '🔴'} Заряд: <b>{soc2}%</b>"
+                            text = f"⚠️ <b>НАСОСИ</b>\n{'🟡' if tr==65 else '🔴'} Заряд: <b>{soc2}%</b>"
                             await app.bot.send_message(NOTIFY_CHAT_ID, text, message_thread_id=THREAD_ID, parse_mode="HTML")
                             sent_alerts["PUMPS"].add(tr)
                         elif soc2 > tr + 5: sent_alerts["PUMPS"].discard(tr)
@@ -108,15 +107,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         icon = "🟢" if soc >= 50 else "🟡" if soc >= 20 else "🔴"
         await msg.edit_text(f"📍 <b>{update.message.text}</b>\n{icon} Заряд: {soc}%", parse_mode="HTML")
 
-def main():
+async def main_async():
+    # Запускаємо вебсервер для Health Check у фоновому потоці
     Thread(target=run_health_check, daemon=True).start()
+    
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    loop = asyncio.get_event_loop()
-    loop.create_task(check_alerts(app))
-    app.run_polling(drop_pending_updates=True)
+    # Фонова перевірка стану батарей
+    asyncio.create_task(check_alerts(app))
+    
+    # Стабільний запуск для сучасного Python та PTB
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling(drop_pending_updates=True)
+    
+    # Утримуємо додаток живим
+    stop_signal = asyncio.Event()
+    await stop_signal.wait()
+
+def main():
+    asyncio.run(main_async())
 
 if __name__ == "__main__":
     main()
