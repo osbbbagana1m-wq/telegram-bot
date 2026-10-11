@@ -18,7 +18,8 @@ APP_SECRET = os.getenv("DEYE_APP_SECRET")
 EMAIL = os.getenv("DEYE_EMAIL")
 PASSWORD = os.getenv("DEYE_PASSWORD")
 STATION_ID_1 = os.getenv("DEYE_STATION_ID")
-STATION_ID_2 = os.getenv("STATION_ID_2")
+STATION_ID_2 = os.getenv("DEYE_STATION_ID_2")
+STATION_ID_3 = os.getenv("DEYE_STATION_ID_3")
 NOTIFY_CHAT_ID = os.getenv("NOTIFY_CHAT_ID")
 
 # ID ТЕМИ: Теплопостачання/Електрика
@@ -26,9 +27,10 @@ THREAD_ID = 12813
 
 BASE_URL = "https://eu1-developer.deyecloud.com:443"
 BTN_LIFTS = "🔋 Ліфти"
-BTN_PUMPS = "🚰 Насоси (ГВП/Опалення)"
+BTN_PUMPS_2 = "🚰 2 контур (Насоси ГВП/Опалення)"
+BTN_PUMPS_1 = "🚰 1 контур (Насоси ГВП/Опалення)"
 
-sent_alerts = {"LIFTS": set(), "PUMPS": set()}
+sent_alerts = {"LIFTS": set(), "PUMPS_2": set(), "PUMPS_1": set()}
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -70,7 +72,7 @@ async def check_alerts(app):
     while True:
         if NOTIFY_CHAT_ID and "-" in str(NOTIFY_CHAT_ID):
             try:
-                # ЛІФТИ (50, 20)
+                # 1. ЛІФТИ (50, 20)
                 soc1 = get_battery_soc(STATION_ID_1)
                 if soc1 is not None:
                     for tr in [50, 20]:
@@ -80,50 +82,70 @@ async def check_alerts(app):
                             sent_alerts["LIFTS"].add(tr)
                         elif soc1 > tr + 5: sent_alerts["LIFTS"].discard(tr)
 
-                # НАСОСИ (65, 20)
+                # 2. 2 контур (50, 20)
                 soc2 = get_battery_soc(STATION_ID_2)
                 if soc2 is not None:
-                    for tr in [65, 20]:
-                        if soc2 <= tr and tr not in sent_alerts["PUMPS"]:
-                            text = f"⚠️ <b>НАСОСИ</b>\n{'🟡' if tr==65 else '🔴'} Заряд: <b>{soc2}%</b>"
+                    for tr in [50, 20]:
+                        if soc2 <= tr and tr not in sent_alerts["PUMPS_2"]:
+                            text = f"⚠️ <b>2 контур (Насоси ГВП/Опалення)</b>\n{'🟡' if tr==50 else '🔴'} Заряд: <b>{soc2}%</b>"
                             await app.bot.send_message(NOTIFY_CHAT_ID, text, message_thread_id=THREAD_ID, parse_mode="HTML")
-                            sent_alerts["PUMPS"].add(tr)
-                        elif soc2 > tr + 5: sent_alerts["PUMPS"].discard(tr)
+                            sent_alerts["PUMPS_2"].add(tr)
+                        elif soc2 > tr + 5: sent_alerts["PUMPS_2"].discard(tr)
+
+                # 3. 1 контур (50, 20)
+                soc3 = get_battery_soc(STATION_ID_3)
+                if soc3 is not None:
+                    for tr in [50, 20]:
+                        if soc3 <= tr and tr not in sent_alerts["PUMPS_1"]:
+                            text = f"⚠️ <b>1 контур (Насоси ГВП/Опалення)</b>\n{'🟡' if tr==50 else '🔴'} Заряд: <b>{soc3}%</b>"
+                            await app.bot.send_message(NOTIFY_CHAT_ID, text, message_thread_id=THREAD_ID, parse_mode="HTML")
+                            sent_alerts["PUMPS_1"].add(tr)
+                        elif soc3 > tr + 5: sent_alerts["PUMPS_1"].discard(tr)
+
             except Exception as e: logger.error(f"Alert error: {e}")
         await asyncio.sleep(600)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[BTN_LIFTS, BTN_PUMPS]]
+    keyboard = [
+        [BTN_LIFTS],
+        [BTN_PUMPS_2],
+        [BTN_PUMPS_1]
+    ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text("📟 Виберіть систему:", reply_markup=reply_markup)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.text not in [BTN_LIFTS, BTN_PUMPS]: return
+    text_btn = update.message.text
+    if text_btn not in [BTN_LIFTS, BTN_PUMPS_2, BTN_PUMPS_1]: return
+    
     msg = await update.message.reply_text("🔄 Отримую дані...")
-    sid = STATION_ID_1 if update.message.text == BTN_LIFTS else STATION_ID_2
+    
+    if text_btn == BTN_LIFTS:
+        sid = STATION_ID_1
+    elif text_btn == BTN_PUMPS_2:
+        sid = STATION_ID_2
+    else:
+        sid = STATION_ID_3
+        
     soc = get_battery_soc(sid)
-    if soc is None: await msg.edit_text("❌ Помилка")
+    if soc is None: await msg.edit_text("❌ Помилка отримання даних")
     else:
         icon = "🟢" if soc >= 50 else "🟡" if soc >= 20 else "🔴"
-        await msg.edit_text(f"📍 <b>{update.message.text}</b>\n{icon} Заряд: {soc}%", parse_mode="HTML")
+        await msg.edit_text(f"📍 <b>{text_btn}</b>\n{icon} Заряд: {soc}%", parse_mode="HTML")
 
 async def main_async():
-    # Запускаємо вебсервер для Health Check у фоновому потоці
     Thread(target=run_health_check, daemon=True).start()
     
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    # Фонова перевірка стану батарей
     asyncio.create_task(check_alerts(app))
     
-    # Стабільний запуск для сучасного Python та PTB
     await app.initialize()
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
     
-    # Утримуємо додаток живим
     stop_signal = asyncio.Event()
     await stop_signal.wait()
 
