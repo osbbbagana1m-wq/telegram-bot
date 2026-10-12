@@ -85,7 +85,7 @@ def get_battery_soc(station_id):
 async def check_grid_status(app):
     """Фонова перевірка світла: базовий інтервал 2 хв, при підозрі — контрольна перевірка через 1 хв."""
     global grid_state
-    monitor_sid = STATION_ID_1  # Використовуємо першу станцію як базову для контролю мережі
+    monitor_sid = STATION_ID_1
     
     while True:
         try:
@@ -98,12 +98,10 @@ async def check_grid_status(app):
                     grid_state["consecutive_offline"] += 1
                     grid_state["consecutive_online"] = 0
                     
-                    # Якщо виявили зникнення вперше, робимо швидку перевірку через 1 хв
                     if grid_state["consecutive_offline"] == 1:
                         await asyncio.sleep(60)
                         continue
                         
-                    # Якщо підтвердилося (1 швидка + 1 основна перевірка)
                     if grid_state["consecutive_offline"] >= 2 and grid_state["is_online"]:
                         grid_state["is_online"] = False
                         grid_state["outage_start"] = asyncio.get_event_loop().time()
@@ -115,7 +113,6 @@ async def check_grid_status(app):
                     grid_state["consecutive_online"] += 1
                     grid_state["consecutive_offline"] = 0
                     
-                    # Якщо світло з'явилося стабільно (2 перевірки поспіль)
                     if grid_state["consecutive_online"] >= 2 and not grid_state["is_online"]:
                         grid_state["is_online"] = True
                         
@@ -132,7 +129,6 @@ async def check_grid_status(app):
         except Exception as e:
             logger.error(f"Grid check error: {e}")
         
-        # Стандартний інтервал перевірки — 2 хвилини
         await asyncio.sleep(120)
 
 async def check_alerts(app):
@@ -147,10 +143,82 @@ async def check_alerts(app):
                             text = f"⚠️ <b>ЛІФТИ</b>\n{'🟡' if tr==50 else '🔴'} Заряд: <b>{soc1}%</b>"
                             await app.bot.send_message(NOTIFY_CHAT_ID, text, message_thread_id=THREAD_ID, parse_mode="HTML")
                             sent_alerts["LIFTS"].add(tr)
-                        elif soc1 > tr + 5: sent_alerts["LIFTS"].discard(tr)
+                        elif soc1 > tr + 5:
+                            sent_alerts["LIFTS"].discard(tr)
 
                 # 2. 2 контур (50, 20)
                 soc2 = get_battery_soc(STATION_ID_2)
                 if soc2 is not None:
                     for tr in [50, 20]:
-                        if soc2 <= tr and
+                        if soc2 <= tr and tr not in sent_alerts["PUMPS_2"]:
+                            text = f"⚠️ <b>2 контур (Насоси ГВП/Опалення)</b>\n{'🟡' if tr==50 else '🔴'} Заряд: <b>{soc2}%</b>"
+                            await app.bot.send_message(NOTIFY_CHAT_ID, text, message_thread_id=THREAD_ID, parse_mode="HTML")
+                            sent_alerts["PUMPS_2"].add(tr)
+                        elif soc2 > tr + 5:
+                            sent_alerts["PUMPS_2"].discard(tr)
+
+                # 3. 1 контур (50, 20)
+                soc3 = get_battery_soc(STATION_ID_3)
+                if soc3 is not None:
+                    for tr in [50, 20]:
+                        if soc3 <= tr and tr not in sent_alerts["PUMPS_1"]:
+                            text = f"⚠️ <b>1 контур (Насоси ГВП/Опалення)</b>\n{'🟡' if tr==50 else '🔴'} Заряд: <b>{soc3}%</b>"
+                            await app.bot.send_message(NOTIFY_CHAT_ID, text, message_thread_id=THREAD_ID, parse_mode="HTML")
+                            sent_alerts["PUMPS_1"].add(tr)
+                        elif soc3 > tr + 5:
+                            sent_alerts["PUMPS_1"].discard(tr)
+
+            except Exception as e:
+                logger.error(f"Alert error: {e}")
+        await asyncio.sleep(600)
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [BTN_LIFTS],
+        [BTN_PUMPS_2],
+        [BTN_PUMPS_1]
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    await update.message.reply_text("📟 Виберіть систему:", reply_markup=reply_markup)
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text_btn = update.message.text
+    if text_btn not in [BTN_LIFTS, BTN_PUMPS_2, BTN_PUMPS_1]: return
+    
+    msg = await update.message.reply_text("🔄 Отримую дані...")
+    
+    if text_btn == BTN_LIFTS:
+        sid = STATION_ID_1
+    elif text_btn == BTN_PUMPS_2:
+        sid = STATION_ID_2
+    else:
+        sid = STATION_ID_3
+        
+    soc = get_battery_soc(sid)
+    if soc is None: await msg.edit_text("❌ Помилка отримання даних")
+    else:
+        icon = "🟢" if soc >= 50 else "🟡" if soc >= 20 else "🔴"
+        await msg.edit_text(f"📍 <b>{text_btn}</b>\n{icon} Заряд: {soc}%", parse_mode="HTML")
+
+async def main_async():
+    Thread(target=run_health_check, daemon=True).start()
+    
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    asyncio.create_task(check_alerts(app))
+    asyncio.create_task(check_grid_status(app))
+    
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling(drop_pending_updates=True)
+    
+    stop_signal = asyncio.Event()
+    await stop_signal.wait()
+
+def main():
+    asyncio.run(main_async())
+
+if __name__ == "__main__":
+    main()
