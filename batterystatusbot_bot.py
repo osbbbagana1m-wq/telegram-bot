@@ -32,6 +32,14 @@ BTN_PUMPS_1 = "🚰 1 контур (Насоси ГВП/Опалення)"
 
 sent_alerts = {"LIFTS": set(), "PUMPS_2": set(), "PUMPS_1": set()}
 
+# Стан для моніторингу світла
+grid_state = {
+    "is_online": True,
+    "outage_start": None,
+    "consecutive_offline": 0,
+    "consecutive_online": 0,
+}
+
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -53,7 +61,8 @@ def get_deye_token():
         return r.json().get("accessToken")
     except: return None
 
-def get_battery_soc(station_id):
+def get_station_data(station_id):
+    """Отримує повний словник даних станції з Deye Cloud для аналізу SoC та мережі."""
     token = get_deye_token()
     if not token or not station_id: return None
     headers = {"Authorization": f"Bearer {token}"}
@@ -62,11 +71,68 @@ def get_battery_soc(station_id):
     try:
         r = requests.post(url, json=payload, headers=headers, timeout=15)
         data = r.json()
-        if "batterySOC" in data: return float(data["batterySOC"])
-        if "data" in data and "batterySOC" in data["data"]:
-            return float(data["data"]["batterySOC"])
-        return None
+        if "data" in data and isinstance(data["data"], dict):
+            return data["data"]
+        return data
     except: return None
+
+def get_battery_soc(station_id):
+    data = get_station_data(station_id)
+    if not data: return None
+    if "batterySOC" in data: return float(data["batterySOC"])
+    return None
+
+async def check_grid_status(app):
+    """Фонова передача статусу світла з урахуванням фільтрації стрибків напруги."""
+    global grid_state
+    monitor_sid = STATION_ID_1  # Використовуємо першу станцію як базову для контролю мережі
+    
+    while True:
+        if NOTIFY_CHAT_ID and "-" in str(NOTIFY_CHAT_ID):
+            try:
+                data = get_station_data(monitor_sid)
+                if data:
+                    # У Deye статус мережі чи напруга може передаватись у різних полях (наприклад, gridVoltage або status).
+                    # Перевіряємо наявність напруги мережі або поточний режим. Якщо ключа немає, робимо базову перевірку по gridVoltage чи power.
+                    # Поширений ключ напруги сітки в API: gridVoltage або сумарна наявність мережі. 
+                    # Якщо точний ключ у вашому API відрізняється, зазвичай інвертор передає gridVoltage. 
+                    grid_voltage = float(data.get("gridVoltage", data.get("grid_voltage", 220)))
+                    
+                    # Якщо напруга нижче 170V або дорівнює 0 — вважаємо, що мережі немає (захист від просідань нижче норми)
+                    is_grid_present = grid_voltage > 170
+                    
+                    if not is_grid_present:
+                        grid_state["consecutive_offline"] += 1
+                        grid_state["consecutive_online"] = 0
+                        
+                        # 3 цикки підряд (30 хв або залежно від частоти перевірки) підтверджують аварію/вимкнення
+                        if grid_state["consecutive_offline"] >= 2 and grid_state["is_online"]:
+                            grid_state["is_online"] = False
+                            grid_state["outage_start"] = asyncio.get_event_loop().time()
+                            
+                            text = f"🔴 <b>Світло зникло в будинку!</b>\n(Мережа нестабільна або зникла, напруга: {grid_voltage}В)"
+                            await app.bot.send_message(NOTIFY_CHAT_ID, text, message_thread_id=THREAD_ID, parse_mode="HTML")
+                    else:
+                        grid_state["consecutive_online"] += 1
+                        grid_state["consecutive_offline"] = 0
+                        
+                        # Якщо світло стабільно з'явилося
+                        if grid_state["consecutive_online"] >= 2 and not grid_state["is_online"]:
+                            grid_state["is_online"] = True
+                            
+                            duration_str = ""
+                            if grid_state["outage_start"]:
+                                duration_sec = asyncio.get_event_loop().time() - grid_state["outage_start"]
+                                hours = int(duration_sec // 3600)
+                                minutes = int((duration_sec % 3600) // 60)
+                                duration_str = f"\n⏱ Було вимкнено: <b>{hours} год {minutes} хв</b>"
+                            
+                            text = f"🟢 <b>Світло з'явилося!</b>{duration_str}"
+                            await app.bot.send_message(NOTIFY_CHAT_ID, text, message_thread_id=THREAD_ID, parse_mode="HTML")
+            except Exception as e:
+                logger.error(f"Grid check error: {e}")
+        
+        await asyncio.sleep(300) # Перевірка кожні 5 хвилин (щоб не перевантажувати API)
 
 async def check_alerts(app):
     while True:
@@ -140,7 +206,9 @@ async def main_async():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
+    # Запускаємо обидва фонові моніторинги: батареї та світло
     asyncio.create_task(check_alerts(app))
+    asyncio.create_task(check_grid_status(app))
     
     await app.initialize()
     await app.start()
