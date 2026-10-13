@@ -22,8 +22,7 @@ STATION_ID_1 = os.getenv("DEYE_STATION_ID")
 STATION_ID_2 = os.getenv("DEYE_STATION_ID_2")
 STATION_ID_3 = os.getenv("DEYE_STATION_ID_3")
 
-# Впишіть сюди ваш числовий Telegram ID (якщо хочете отримувати сповіщення адміна по всіх хабах)
-ADMIN_CHAT_ID = None  # Наприклад: 123456789
+ADMIN_CHAT_ID = 5678221647
 
 BASE_URL = "https://eu1-developer.deyecloud.com:443"
 BTN_LIFTS = "🔋 Ліфти"
@@ -54,7 +53,7 @@ def save_subscribers(subs):
 subscribers = load_subscribers()
 
 grid_state = {
-    "is_online": True,
+    "is_online": None,  # Змінено на None, щоб визначити стан при першому ж опитуванні
     "outage_start": None,
 }
 
@@ -140,7 +139,13 @@ async def check_grid_status(app):
                 
                 is_currently_online = (grid_power > 0 or purchase_power > 0)
                 
-                if grid_state["is_online"] and not is_currently_online:
+                # Якщо це перша перевірка після запуску бота
+                if grid_state["is_online"] is None:
+                    grid_state["is_online"] = is_currently_online
+                    if not is_currently_online:
+                        grid_state["outage_start"] = asyncio.get_event_loop().time()
+                
+                elif grid_state["is_online"] and not is_currently_online:
                     grid_state["is_online"] = False
                     grid_state["outage_start"] = asyncio.get_event_loop().time()
                     
@@ -175,7 +180,6 @@ async def check_grid_status(app):
 async def check_alerts(app):
     while True:
         try:
-            # 1. ЛІФТИ (20% для всіх мешканців + адмін)
             soc1 = get_battery_soc(STATION_ID_1)
             if soc1 is not None:
                 tr = 20
@@ -187,7 +191,6 @@ async def check_alerts(app):
                 elif soc1 > tr + 5:
                     sent_alerts["LIFTS"].discard(tr)
 
-            # 2. 2 контур (тільки для адміна)
             soc2 = get_battery_soc(STATION_ID_2)
             if soc2 is not None:
                 tr = 20
@@ -202,7 +205,6 @@ async def check_alerts(app):
                 elif soc2 > tr + 5:
                     sent_alerts["PUMPS_2"].discard(tr)
 
-            # 3. 1 контур (тільки для адміна)
             soc3 = get_battery_soc(STATION_ID_3)
             if soc3 is not None:
                 tr = 20
