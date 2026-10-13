@@ -6,7 +6,7 @@ import json
 import asyncio
 from threading import Thread
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from telegram import Update, ReplyKeyboardMarkup
+from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -22,14 +22,17 @@ STATION_ID_1 = os.getenv("DEYE_STATION_ID")
 STATION_ID_2 = os.getenv("DEYE_STATION_ID_2")
 STATION_ID_3 = os.getenv("DEYE_STATION_ID_3")
 
+# Впишіть сюди ваш числовий Telegram ID (якщо хочете отримувати сповіщення адміна по всіх хабах)
+ADMIN_CHAT_ID = 5678221647  # Наприклад: 123456789
+
 BASE_URL = "https://eu1-developer.deyecloud.com:443"
 BTN_LIFTS = "🔋 Ліфти"
 BTN_PUMPS_2 = "🚰 2 контур (Насоси ГВП/Опалення)"
 BTN_PUMPS_1 = "🚰 1 контур (Насоси ГВП/Опалення)"
+BTN_STOP = "🔕 Зупинити сповіщення"
 
 sent_alerts = {"LIFTS": set(), "PUMPS_2": set(), "PUMPS_1": set()}
 
-# Файл для збереження підписаних користувачів
 USERS_FILE = "subscribers.json"
 
 def load_subscribers():
@@ -48,10 +51,8 @@ def save_subscribers(subs):
     except Exception as e:
         logger.error(f"Error saving subscribers: {e}")
 
-# Множина ID користувачів
 subscribers = load_subscribers()
 
-# Стан для моніторингу світла
 grid_state = {
     "is_online": True,
     "outage_start": None,
@@ -103,22 +104,24 @@ def get_battery_soc(station_id):
         return float(data["batterySOC"])
     return None
 
-async def broadcast_message(app, text):
-    """Розсилає повідомлення всім підписаним мешканцям."""
-    if not subscribers:
-        return
-    for chat_id in list(subscribers):
+async def broadcast_message(app, text, admin_text=None):
+    if subscribers:
+        for chat_id in list(subscribers):
+            try:
+                await app.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+            except Exception as e:
+                logger.error(f"Failed to send message to {chat_id}: {e}")
+                if "Forbidden" in str(e) or "chat not found" in str(e).lower():
+                    subscribers.discard(chat_id)
+                    save_subscribers(subscribers)
+                    
+    if ADMIN_CHAT_ID and admin_text:
         try:
-            await app.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+            await app.bot.send_message(chat_id=ADMIN_CHAT_ID, text=admin_text, parse_mode="HTML")
         except Exception as e:
-            logger.error(f"Failed to send message to {chat_id}: {e}")
-            # Якщо користувач заблокував бота, можна за бажанням видалити його
-            if "Forbidden" in str(e) or "chat not found" in str(e).lower():
-                subscribers.discard(chat_id)
-                save_subscribers(subscribers)
+            logger.error(f"Failed to send admin message: {e}")
 
 async def check_grid_status(app):
-    """Фонова перевірка світла та масова розсилка мешканцям."""
     global grid_state
     monitor_sid = STATION_ID_1
     
@@ -144,7 +147,7 @@ async def check_grid_status(app):
                     text = (
                         f"🔴 <b>Світло зникло в будинку!</b>\n"
                         f"Мережева потужність: <b>0 Вт</b>\n"
-                        f"Заряд батареї: <b>{soc}%</b>"
+                        f"Заряд батареї ліфтів: <b>{soc}%</b>"
                     )
                     await broadcast_message(app, text)
                         
@@ -170,41 +173,49 @@ async def check_grid_status(app):
         await asyncio.sleep(120)
 
 async def check_alerts(app):
-    """Фонова перевірка критичного рівня заряду батарей для розсилки мешканцям."""
     while True:
         try:
-            # 1. ЛІФТИ (50%, 20%)
+            # 1. ЛІФТИ (20% для всіх мешканців + адмін)
             soc1 = get_battery_soc(STATION_ID_1)
             if soc1 is not None:
-                for tr in [50, 20]:
-                    if soc1 <= tr and tr not in sent_alerts["LIFTS"]:
-                        text = f"⚠️ <b>ЛІФТИ</b>\n{'🟡' if tr==50 else '🔴'} Заряд батареї: <b>{soc1}%</b>"
-                        await broadcast_message(app, text)
-                        sent_alerts["LIFTS"].add(tr)
-                    elif soc1 > tr + 5:
-                        sent_alerts["LIFTS"].discard(tr)
+                tr = 20
+                if soc1 <= tr and tr not in sent_alerts["LIFTS"]:
+                    public_text = f"🔴 <b>УВАГА: ЛІФТИ!</b>\nКритичний розряд батареї: <b>{soc1}%</b>\nЖивлення ліфтів на межі вимкнення."
+                    admin_text = f"⚙️ [Адмін] 🔴 <b>ЛІФТИ (Station 1)</b> розрядилися до <b>{soc1}%</b>!"
+                    await broadcast_message(app, public_text, admin_text)
+                    sent_alerts["LIFTS"].add(tr)
+                elif soc1 > tr + 5:
+                    sent_alerts["LIFTS"].discard(tr)
 
-            # 2. 2 контур (50%, 20%)
+            # 2. 2 контур (тільки для адміна)
             soc2 = get_battery_soc(STATION_ID_2)
             if soc2 is not None:
-                for tr in [50, 20]:
-                    if soc2 <= tr and tr not in sent_alerts["PUMPS_2"]:
-                        text = f"⚠️ <b>2 контур (Насоси ГВП/Опалення)</b>\n{'🟡' if tr==50 else '🔴'} Заряд батареї: <b>{soc2}%</b>"
-                        await broadcast_message(app, text)
-                        sent_alerts["PUMPS_2"].add(tr)
-                    elif soc2 > tr + 5:
-                        sent_alerts["PUMPS_2"].discard(tr)
+                tr = 20
+                if soc2 <= tr and tr not in sent_alerts["PUMPS_2"]:
+                    if ADMIN_CHAT_ID:
+                        await app.bot.send_message(
+                            chat_id=ADMIN_CHAT_ID, 
+                            text=f"⚙️ [Адмін] 🔴 <b>2 контур (Насоси)</b> розрядився до <b>{soc2}%</b>!", 
+                            parse_mode="HTML"
+                        )
+                    sent_alerts["PUMPS_2"].add(tr)
+                elif soc2 > tr + 5:
+                    sent_alerts["PUMPS_2"].discard(tr)
 
-            # 3. 1 контур (50%, 20%)
+            # 3. 1 контур (тільки для адміна)
             soc3 = get_battery_soc(STATION_ID_3)
             if soc3 is not None:
-                for tr in [50, 20]:
-                    if soc3 <= tr and tr not in sent_alerts["PUMPS_1"]:
-                        text = f"⚠️ <b>1 контур (Насоси ГВП/Опалення)</b>\n{'🟡' if tr==50 else '🔴'} Заряд батареї: <b>{soc3}%</b>"
-                        await broadcast_message(app, text)
-                        sent_alerts["PUMPS_1"].add(tr)
-                    elif soc3 > tr + 5:
-                        sent_alerts["PUMPS_1"].discard(tr)
+                tr = 20
+                if soc3 <= tr and tr not in sent_alerts["PUMPS_1"]:
+                    if ADMIN_CHAT_ID:
+                        await app.bot.send_message(
+                            chat_id=ADMIN_CHAT_ID, 
+                            text=f"⚙️ [Адмін] 🔴 <b>1 контур (Насоси)</b> розрядився до <b>{soc3}%</b>!", 
+                            parse_mode="HTML"
+                        )
+                    sent_alerts["PUMPS_1"].add(tr)
+                elif soc3 > tr + 5:
+                    sent_alerts["PUMPS_1"].discard(tr)
 
         except Exception as e:
             logger.error(f"Alert error: {e}")
@@ -212,7 +223,6 @@ async def check_alerts(app):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    # Автоматично підписуємо користувача на розсилку при першому знайомстві з ботом
     if chat_id not in subscribers:
         subscribers.add(chat_id)
         save_subscribers(subscribers)
@@ -221,24 +231,46 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [BTN_LIFTS],
         [BTN_PUMPS_2],
-        [BTN_PUMPS_1]
+        [BTN_PUMPS_1],
+        [BTN_STOP]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text(
-        "📟 Вітаємо! Ви підключені до системи моніторингу енергосистем будинку.\n"
-        "Тепер ви отримуватимете сповіщення про зникнення світла та критичний розряд батарей.\n\n"
-        "Виберіть систему для перевірки заряду:", 
+        "📟 Вітаємо!\n"
+        "Бот моніторить енергосистеми будинку.\n"
+        "Ви підписані на аварійні сповіщення про світло та критичний розряд ліфтів.\n\n"
+        " 👇 <b>Кнопки нижче</b> дозволяють перевірити поточний заряд систем у будь-який момент.\n"
+        " 🔕 Натиснувши кнопку <b>«Зупинити сповіщення»</b> (або ввівши /stop), ви зможете відписатися від розсилки.", 
         reply_markup=reply_markup
+    )
+
+async def stop_notifications(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if chat_id in subscribers:
+        subscribers.discard(chat_id)
+        save_subscribers(subscribers)
+        logger.info(f"Subscriber removed: {chat_id}")
+    
+    await update.message.reply_text(
+        "🔕 Ви успішно відписалися від сповіщень.\n"
+        "Якщо захочете підключитися знову, просто натисніть /start",
+        reply_markup=ReplyKeyboardRemove()
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
+    text_btn = update.message.text
+    
+    if text_btn == BTN_STOP:
+        await stop_notifications(update, context)
+        return
+
+    if text_btn not in [BTN_LIFTS, BTN_PUMPS_2, BTN_PUMPS_1]: 
+        return
+    
     if chat_id not in subscribers:
         subscribers.add(chat_id)
         save_subscribers(subscribers)
-
-    text_btn = update.message.text
-    if text_btn not in [BTN_LIFTS, BTN_PUMPS_2, BTN_PUMPS_1]: return
     
     msg = await update.message.reply_text("🔄 Отримую дані...")
     
@@ -248,6 +280,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sid = STATION_ID_2
     else:
         sid = STATION_ID_3
+        sync_sid = sid # placeholder
         
     soc = get_battery_soc(sid)
     if soc is None:
@@ -261,6 +294,7 @@ async def main_async():
     
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("stop", stop_notifications))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     asyncio.create_task(check_alerts(app))
