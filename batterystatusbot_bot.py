@@ -23,7 +23,7 @@ STATION_ID_2 = os.getenv("DEYE_STATION_ID_2")
 STATION_ID_3 = os.getenv("DEYE_STATION_ID_3")
 
 # Впишіть сюди ваш числовий Telegram ID (якщо хочете отримувати сповіщення адміна по всіх хабах)
-ADMIN_CHAT_ID = 5678221647  # Наприклад: 123456789
+ADMIN_CHAT_ID = None  # Наприклад: 123456789
 
 BASE_URL = "https://eu1-developer.deyecloud.com:443"
 BTN_LIFTS = "🔋 Ліфти"
@@ -239,8 +239,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📟 Вітаємо!\n"
         "Бот моніторить енергосистеми будинку.\n"
         "Ви підписані на аварійні сповіщення про світло та критичний розряд ліфтів.\n\n"
-        " 👇 <b>Кнопки нижче</b> дозволяють перевірити поточний заряд систем у будь-який момент.\n"
-        " 🔕 Натиснувши кнопку <b>«Зупинити сповіщення»</b> (або ввівши /stop), ви зможете відписатися від розсилки.", 
+        "👇 <b>Кнопки нижче</b> дозволяють перевірити поточний заряд систем у будь-який момент.\n"
+        "🔕 Натиснувши кнопку <b>«Зупинити сповіщення»</b> (або ввівши /stop), ви зможете відписатися від розсилки.", 
+        parse_mode="HTML",
         reply_markup=reply_markup
     )
 
@@ -280,7 +281,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sid = STATION_ID_2
     else:
         sid = STATION_ID_3
-        sync_sid = sid # placeholder
         
     soc = get_battery_soc(sid)
     if soc is None:
