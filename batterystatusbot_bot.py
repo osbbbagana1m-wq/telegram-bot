@@ -83,17 +83,21 @@ def get_battery_soc(station_id):
     return None
 
 async def check_grid_status(app):
-    """Фонова перевірка світла з детальним логуванням напруги."""
+    """Фонова перевірка світла для інвертора STATION_ID_3."""
     global grid_state
-    monitor_sid = STATION_ID_1
+    monitor_sid = STATION_ID_3  # Перевіряємо третій інвертор
     
     while True:
         try:
             data = get_station_data(monitor_sid)
             if data:
+                logger.info(f"Inverter 3 keys: {list(data.keys())}")
+                logger.info(f"Grid Power: {data.get('gridPower')} | Grid Voltage: {data.get('gridVoltage', data.get('grid_voltage'))}")
+                
                 grid_voltage = float(data.get("gridVoltage", data.get("grid_voltage", 220)))
-                logger.info(f"Grid voltage check: {grid_voltage}V | Raw data keys: {list(data.keys())}")
-                is_grid_present = grid_voltage > 170
+                grid_power = float(data.get("gridPower", 0))
+                
+                is_grid_present = grid_voltage > 170 if "gridVoltage" in data or "grid_voltage" in data else grid_power != 0
                 
                 if not is_grid_present:
                     grid_state["consecutive_offline"] += 1
@@ -108,7 +112,7 @@ async def check_grid_status(app):
                         grid_state["outage_start"] = asyncio.get_event_loop().time()
                         
                         if NOTIFY_CHAT_ID and "-" in str(NOTIFY_CHAT_ID):
-                            text = f"🔴 <b>Світло зникло в будинку!</b>\n(Мережа зникла, напруга: {grid_voltage}В)"
+                            text = f"🔴 <b>Світло зникло в будинку!</b>\n(Інвертор 3, дані: {data.get('gridVoltage', grid_power)})"
                             await app.bot.send_message(NOTIFY_CHAT_ID, text, message_thread_id=THREAD_ID, parse_mode="HTML")
                 else:
                     grid_state["consecutive_online"] += 1
@@ -128,7 +132,7 @@ async def check_grid_status(app):
                             text = f"🟢 <b>Світло з'явилося!</b>{duration_str}"
                             await app.bot.send_message(NOTIFY_CHAT_ID, text, message_thread_id=THREAD_ID, parse_mode="HTML")
         except Exception as e:
-            logger.error(f"Grid check error: {e}")
+            logger.error(f"Grid check error (Inverter 3): {e}")
         
         await asyncio.sleep(120)
 
@@ -164,7 +168,6 @@ async def check_alerts(app):
                     for tr in [50, 20]:
                         if soc3 <= tr and tr not in sent_alerts["PUMPS_1"]:
                             text = f"⚠️ <b>1 контур (Насоси ГВП/Опалення)</b>\n{'🟡' if tr==50 else '🔴'} Заряд: <b>{soc3}%</b>"
-                            str(tr)
                             await app.bot.send_message(NOTIFY_CHAT_ID, text, message_thread_id=THREAD_ID, parse_mode="HTML")
                             sent_alerts["PUMPS_1"].add(tr)
                         elif soc3 > tr + 5:
