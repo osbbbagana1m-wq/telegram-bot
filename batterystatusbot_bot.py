@@ -83,7 +83,7 @@ def get_battery_soc(station_id):
     return None
 
 async def check_grid_status(app):
-    """Фонова перевірка світла: базовий інтервал 2 хв, при підозрі — контрольна перевірка через 1 хв."""
+    """Фонова перевірка світла з детальним логуванням напруги."""
     global grid_state
     monitor_sid = STATION_ID_1
     
@@ -92,6 +92,7 @@ async def check_grid_status(app):
             data = get_station_data(monitor_sid)
             if data:
                 grid_voltage = float(data.get("gridVoltage", data.get("grid_voltage", 220)))
+                logger.info(f"Grid voltage check: {grid_voltage}V | Raw data keys: {list(data.keys())}")
                 is_grid_present = grid_voltage > 170
                 
                 if not is_grid_present:
@@ -163,6 +164,7 @@ async def check_alerts(app):
                     for tr in [50, 20]:
                         if soc3 <= tr and tr not in sent_alerts["PUMPS_1"]:
                             text = f"⚠️ <b>1 контур (Насоси ГВП/Опалення)</b>\n{'🟡' if tr==50 else '🔴'} Заряд: <b>{soc3}%</b>"
+                            str(tr)
                             await app.bot.send_message(NOTIFY_CHAT_ID, text, message_thread_id=THREAD_ID, parse_mode="HTML")
                             sent_alerts["PUMPS_1"].add(tr)
                         elif soc3 > tr + 5:
