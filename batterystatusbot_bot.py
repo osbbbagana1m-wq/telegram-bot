@@ -2,6 +2,7 @@ import logging
 import requests
 import hashlib
 import os
+import json
 import asyncio
 from threading import Thread
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -20,10 +21,6 @@ PASSWORD = os.getenv("DEYE_PASSWORD")
 STATION_ID_1 = os.getenv("DEYE_STATION_ID")
 STATION_ID_2 = os.getenv("DEYE_STATION_ID_2")
 STATION_ID_3 = os.getenv("DEYE_STATION_ID_3")
-NOTIFY_CHAT_ID = os.getenv("NOTIFY_CHAT_ID")
-
-# ID ТЕМИ: Теплопостачання/Електрика
-THREAD_ID = 12813 
 
 BASE_URL = "https://eu1-developer.deyecloud.com:443"
 BTN_LIFTS = "🔋 Ліфти"
@@ -31,6 +28,28 @@ BTN_PUMPS_2 = "🚰 2 контур (Насоси ГВП/Опалення)"
 BTN_PUMPS_1 = "🚰 1 контур (Насоси ГВП/Опалення)"
 
 sent_alerts = {"LIFTS": set(), "PUMPS_2": set(), "PUMPS_1": set()}
+
+# Файл для збереження підписаних користувачів
+USERS_FILE = "subscribers.json"
+
+def load_subscribers():
+    if os.path.exists(USERS_FILE):
+        try:
+            with open(USERS_FILE, "r") as f:
+                return set(json.load(f))
+        except:
+            pass
+    return set()
+
+def save_subscribers(subs):
+    try:
+        with open(USERS_FILE, "w") as f:
+            json.dump(list(subs), f)
+    except Exception as e:
+        logger.error(f"Error saving subscribers: {e}")
+
+# Множина ID користувачів
+subscribers = load_subscribers()
 
 # Стан для моніторингу світла
 grid_state = {
@@ -62,7 +81,6 @@ def get_deye_token():
         return None
 
 def get_station_data(station_id):
-    """Отримує повний словник даних станції з Deye Cloud."""
     token = get_deye_token()
     if not token or not station_id: return None
     headers = {"Authorization": f"Bearer {token}"}
@@ -85,8 +103,22 @@ def get_battery_soc(station_id):
         return float(data["batterySOC"])
     return None
 
+async def broadcast_message(app, text):
+    """Розсилає повідомлення всім підписаним мешканцям."""
+    if not subscribers:
+        return
+    for chat_id in list(subscribers):
+        try:
+            await app.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"Failed to send message to {chat_id}: {e}")
+            # Якщо користувач заблокував бота, можна за бажанням видалити його
+            if "Forbidden" in str(e) or "chat not found" in str(e).lower():
+                subscribers.discard(chat_id)
+                save_subscribers(subscribers)
+
 async def check_grid_status(app):
-    """Фонова перевірка світла за параметрами купівельної потужності мережі (Station ID 1)."""
+    """Фонова перевірка світла та масова розсилка мешканцям."""
     global grid_state
     monitor_sid = STATION_ID_1
     
@@ -103,26 +135,20 @@ async def check_grid_status(app):
                     f"gridPower: {grid_power}W | purchasePower: {purchase_power}W | SOC: {soc}%"
                 )
                 
-                # Мережа є ТІЛЬКИ якщо є потік енергії з мережі
                 is_currently_online = (grid_power > 0 or purchase_power > 0)
                 
                 if grid_state["is_online"] and not is_currently_online:
-                    # Світло ЗНИКЛО
                     grid_state["is_online"] = False
                     grid_state["outage_start"] = asyncio.get_event_loop().time()
                     
-                    if NOTIFY_CHAT_ID:
-                        text = (
-                            f"🔴 <b>Світло зникло в будинку!</b>\n"
-                            f"Мережева потужність: <b>0 Вт</b>\n"
-                            f"Заряд батареї: <b>{soc}%</b>"
-                        )
-                        await app.bot.send_message(
-                            int(NOTIFY_CHAT_ID), text, message_thread_id=THREAD_ID, parse_mode="HTML"
-                        )
+                    text = (
+                        f"🔴 <b>Світло зникло в будинку!</b>\n"
+                        f"Мережева потужність: <b>0 Вт</b>\n"
+                        f"Заряд батареї: <b>{soc}%</b>"
+                    )
+                    await broadcast_message(app, text)
                         
                 elif not grid_state["is_online"] and is_currently_online:
-                    # Світло З'ЯВИЛОСЯ
                     grid_state["is_online"] = True
                     
                     duration_str = ""
@@ -132,72 +158,85 @@ async def check_grid_status(app):
                         minutes = int((duration_sec % 3600) // 60)
                         duration_str = f"\n⏱ Було вимкнено: <b>{hours} год {minutes} хв</b>"
                     
-                    if NOTIFY_CHAT_ID:
-                        text = (
-                            f"🟢 <b>Світло з'явилося!</b>"
-                            f"{duration_str}\n"
-                            f"Потужність мережі: <b>{max(grid_power, purchase_power)} Вт</b>"
-                        )
-                        await app.bot.send_message(
-                            int(NOTIFY_CHAT_ID), text, message_thread_id=THREAD_ID, parse_mode="HTML"
-                        )
+                    text = (
+                        f"🟢 <b>Світло з'явилося!</b>"
+                        f"{duration_str}\n"
+                        f"Потужність мережі: <b>{max(grid_power, purchase_power)} Вт</b>"
+                    )
+                    await broadcast_message(app, text)
         except Exception as e:
             logger.error(f"Grid check exception: {e}")
         
         await asyncio.sleep(120)
 
 async def check_alerts(app):
-    """Фонова перевірка рівня заряду акумуляторів (кожні 10 хвилин)."""
+    """Фонова перевірка критичного рівня заряду батарей для розсилки мешканцям."""
     while True:
-        if NOTIFY_CHAT_ID:
-            try:
-                # 1. ЛІФТИ (50%, 20%)
-                soc1 = get_battery_soc(STATION_ID_1)
-                if soc1 is not None:
-                    for tr in [50, 20]:
-                        if soc1 <= tr and tr not in sent_alerts["LIFTS"]:
-                            text = f"⚠️ <b>ЛІФТИ</b>\n{'🟡' if tr==50 else '🔴'} Заряд: <b>{soc1}%</b>"
-                            await app.bot.send_message(int(NOTIFY_CHAT_ID), text, message_thread_id=THREAD_ID, parse_mode="HTML")
-                            sent_alerts["LIFTS"].add(tr)
-                        elif soc1 > tr + 5:
-                            sent_alerts["LIFTS"].discard(tr)
+        try:
+            # 1. ЛІФТИ (50%, 20%)
+            soc1 = get_battery_soc(STATION_ID_1)
+            if soc1 is not None:
+                for tr in [50, 20]:
+                    if soc1 <= tr and tr not in sent_alerts["LIFTS"]:
+                        text = f"⚠️ <b>ЛІФТИ</b>\n{'🟡' if tr==50 else '🔴'} Заряд батареї: <b>{soc1}%</b>"
+                        await broadcast_message(app, text)
+                        sent_alerts["LIFTS"].add(tr)
+                    elif soc1 > tr + 5:
+                        sent_alerts["LIFTS"].discard(tr)
 
-                # 2. 2 контур (50%, 20%)
-                soc2 = get_battery_soc(STATION_ID_2)
-                if soc2 is not None:
-                    for tr in [50, 20]:
-                        if soc2 <= tr and tr not in sent_alerts["PUMPS_2"]:
-                            text = f"⚠️ <b>2 контур (Насоси ГВП/Опалення)</b>\n{'🟡' if tr==50 else '🔴'} Заряд: <b>{soc2}%</b>"
-                            await app.bot.send_message(int(NOTIFY_CHAT_ID), text, message_thread_id=THREAD_ID, parse_mode="HTML")
-                            sent_alerts["PUMPS_2"].add(tr)
-                        elif soc2 > tr + 5:
-                            sent_alerts["PUMPS_2"].discard(tr)
+            # 2. 2 контур (50%, 20%)
+            soc2 = get_battery_soc(STATION_ID_2)
+            if soc2 is not None:
+                for tr in [50, 20]:
+                    if soc2 <= tr and tr not in sent_alerts["PUMPS_2"]:
+                        text = f"⚠️ <b>2 контур (Насоси ГВП/Опалення)</b>\n{'🟡' if tr==50 else '🔴'} Заряд батареї: <b>{soc2}%</b>"
+                        await broadcast_message(app, text)
+                        sent_alerts["PUMPS_2"].add(tr)
+                    elif soc2 > tr + 5:
+                        sent_alerts["PUMPS_2"].discard(tr)
 
-                # 3. 1 контур (50%, 20%)
-                soc3 = get_battery_soc(STATION_ID_3)
-                if soc3 is not None:
-                    for tr in [50, 20]:
-                        if soc3 <= tr and tr not in sent_alerts["PUMPS_1"]:
-                            text = f"⚠️ <b>1 контур (Насоси ГВП/Опалення)</b>\n{'🟡' if tr==50 else '🔴'} Заряд: <b>{soc3}%</b>"
-                            await app.bot.send_message(int(NOTIFY_CHAT_ID), text, message_thread_id=THREAD_ID, parse_mode="HTML")
-                            sent_alerts["PUMPS_1"].add(tr)
-                        elif soc3 > tr + 5:
-                            sent_alerts["PUMPS_1"].discard(tr)
+            # 3. 1 контур (50%, 20%)
+            soc3 = get_battery_soc(STATION_ID_3)
+            if soc3 is not None:
+                for tr in [50, 20]:
+                    if soc3 <= tr and tr not in sent_alerts["PUMPS_1"]:
+                        text = f"⚠️ <b>1 контур (Насоси ГВП/Опалення)</b>\n{'🟡' if tr==50 else '🔴'} Заряд батареї: <b>{soc3}%</b>"
+                        await broadcast_message(app, text)
+                        sent_alerts["PUMPS_1"].add(tr)
+                    elif soc3 > tr + 5:
+                        sent_alerts["PUMPS_1"].discard(tr)
 
-            except Exception as e:
-                logger.error(f"Alert error: {e}")
+        except Exception as e:
+            logger.error(f"Alert error: {e}")
         await asyncio.sleep(600)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    # Автоматично підписуємо користувача на розсилку при першому знайомстві з ботом
+    if chat_id not in subscribers:
+        subscribers.add(chat_id)
+        save_subscribers(subscribers)
+        logger.info(f"New subscriber added: {chat_id}")
+
     keyboard = [
         [BTN_LIFTS],
         [BTN_PUMPS_2],
         [BTN_PUMPS_1]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    await update.message.reply_text("📟 Виберіть систему:", reply_markup=reply_markup)
+    await update.message.reply_text(
+        "📟 Вітаємо! Ви підключені до системи моніторингу енергосистем будинку.\n"
+        "Тепер ви отримуватимете сповіщення про зникнення світла та критичний розряд батарей.\n\n"
+        "Виберіть систему для перевірки заряду:", 
+        reply_markup=reply_markup
+    )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if chat_id not in subscribers:
+        subscribers.add(chat_id)
+        save_subscribers(subscribers)
+
     text_btn = update.message.text
     if text_btn not in [BTN_LIFTS, BTN_PUMPS_2, BTN_PUMPS_1]: return
     
