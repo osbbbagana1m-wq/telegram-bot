@@ -53,7 +53,7 @@ def save_subscribers(subs):
 subscribers = load_subscribers()
 
 grid_state = {
-    "is_online": None,  # Змінено на None, щоб визначити стан при першому ж опитуванні
+    "is_online": None,  # Ініціалізація для точного визначення стану при першому ж опитуванні
     "outage_start": None,
 }
 
@@ -62,6 +62,10 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"Bot is running")
+        
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
 
 def run_health_check():
     port = int(os.getenv("PORT", 10000))
@@ -139,7 +143,7 @@ async def check_grid_status(app):
                 
                 is_currently_online = (grid_power > 0 or purchase_power > 0)
                 
-                # Якщо це перша перевірка після запуску бота
+                # Перша перевірка після запуску бота
                 if grid_state["is_online"] is None:
                     grid_state["is_online"] = is_currently_online
                     if not is_currently_online:
