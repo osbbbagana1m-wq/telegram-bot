@@ -59,10 +59,12 @@ def get_deye_token():
     try:
         r = requests.post(url, json=payload, timeout=15)
         return r.json().get("accessToken")
-    except: return None
+    except Exception as e:
+        logger.error(f"Token error: {e}")
+        return None
 
 def get_station_data(station_id):
-    """Отримує повний словник даних станції з Deye Cloud для аналізу SoC та мережі."""
+    """Отримує повний словник даних станції з Deye Cloud."""
     token = get_deye_token()
     if not token or not station_id: return None
     headers = {"Authorization": f"Bearer {token}"}
@@ -74,30 +76,38 @@ def get_station_data(station_id):
         if "data" in data and isinstance(data["data"], dict):
             return data["data"]
         return data
-    except: return None
+    except Exception as e:
+        logger.error(f"Get station data error: {e}")
+        return None
 
 def get_battery_soc(station_id):
     data = get_station_data(station_id)
     if not data: return None
-    if "batterySOC" in data: return float(data["batterySOC"])
+    if "batterySOC" in data and data["batterySOC"] is not None:
+        return float(data["batterySOC"])
     return None
 
 async def check_grid_status(app):
-    """Фонова перевірка світла для інвертора STATION_ID_3."""
+    """Фонова перевірка світла за параметрами потужності мережі (Station ID 1)."""
     global grid_state
-    monitor_sid = STATION_ID_3  # Перевіряємо третій інвертор
+    monitor_sid = STATION_ID_1
     
     while True:
         try:
             data = get_station_data(monitor_sid)
             if data:
-                logger.info(f"Inverter 3 keys: {list(data.keys())}")
-                logger.info(f"Grid Power: {data.get('gridPower')} | Grid Voltage: {data.get('gridVoltage', data.get('grid_voltage'))}")
+                grid_power = float(data.get("gridPower") or 0)
+                purchase_power = float(data.get("purchasePower") or 0)
+                wire_power = float(data.get("wirePower") or 0)
+                soc = data.get("batterySOC")
                 
-                grid_voltage = float(data.get("gridVoltage", data.get("grid_voltage", 220)))
-                grid_power = float(data.get("gridPower", 0))
+                logger.info(
+                    f"Grid Check [Station {monitor_sid}] -> "
+                    f"gridPower: {grid_power}W | purchasePower: {purchase_power}W | "
+                    f"wirePower: {wire_power}W | SOC: {soc}%"
+                )
                 
-                is_grid_present = grid_voltage > 170 if "gridVoltage" in data or "grid_voltage" in data else grid_power != 0
+                is_grid_present = (grid_power > 0 or purchase_power > 0 or wire_power > 0)
                 
                 if not is_grid_present:
                     grid_state["consecutive_offline"] += 1
@@ -112,8 +122,14 @@ async def check_grid_status(app):
                         grid_state["outage_start"] = asyncio.get_event_loop().time()
                         
                         if NOTIFY_CHAT_ID and "-" in str(NOTIFY_CHAT_ID):
-                            text = f"🔴 <b>Світло зникло в будинку!</b>\n(Інвертор 3, дані: {data.get('gridVoltage', grid_power)})"
-                            await app.bot.send_message(NOTIFY_CHAT_ID, text, message_thread_id=THREAD_ID, parse_mode="HTML")
+                            text = (
+                                f"🔴 <b>Світло зникло в будинку!</b>\n"
+                                f"Мережева потужність: <b>0 Вт</b>\n"
+                                f"Заряд батареї: <b>{soc}%</b>"
+                            )
+                            await app.bot.send_message(
+                                NOTIFY_CHAT_ID, text, message_thread_id=THREAD_ID, parse_mode="HTML"
+                            )
                 else:
                     grid_state["consecutive_online"] += 1
                     grid_state["consecutive_offline"] = 0
@@ -129,18 +145,25 @@ async def check_grid_status(app):
                             duration_str = f"\n⏱ Було вимкнено: <b>{hours} год {minutes} хв</b>"
                         
                         if NOTIFY_CHAT_ID and "-" in str(NOTIFY_CHAT_ID):
-                            text = f"🟢 <b>Світло з'явилося!</b>{duration_str}"
-                            await app.bot.send_message(NOTIFY_CHAT_ID, text, message_thread_id=THREAD_ID, parse_mode="HTML")
+                            text = (
+                                f"🟢 <b>Світло з'явилося!</b>"
+                                f"{duration_str}\n"
+                                f"Потужність мережі: <b>{max(grid_power, purchase_power)} Вт</b>"
+                            )
+                            await app.bot.send_message(
+                                NOTIFY_CHAT_ID, text, message_thread_id=THREAD_ID, parse_mode="HTML"
+                            )
         except Exception as e:
-            logger.error(f"Grid check error (Inverter 3): {e}")
+            logger.error(f"Grid check exception: {e}")
         
         await asyncio.sleep(120)
 
 async def check_alerts(app):
+    """Фонова перевірка рівня заряду акумуляторів (кожні 10 хвилин)."""
     while True:
         if NOTIFY_CHAT_ID and "-" in str(NOTIFY_CHAT_ID):
             try:
-                # 1. ЛІФТИ (50, 20)
+                # 1. ЛІФТИ (50%, 20%)
                 soc1 = get_battery_soc(STATION_ID_1)
                 if soc1 is not None:
                     for tr in [50, 20]:
@@ -151,7 +174,7 @@ async def check_alerts(app):
                         elif soc1 > tr + 5:
                             sent_alerts["LIFTS"].discard(tr)
 
-                # 2. 2 контур (50, 20)
+                # 2. 2 контур (50%, 20%)
                 soc2 = get_battery_soc(STATION_ID_2)
                 if soc2 is not None:
                     for tr in [50, 20]:
@@ -162,7 +185,7 @@ async def check_alerts(app):
                         elif soc2 > tr + 5:
                             sent_alerts["PUMPS_2"].discard(tr)
 
-                # 3. 1 контур (50, 20)
+                # 3. 1 контур (50%, 20%)
                 soc3 = get_battery_soc(STATION_ID_3)
                 if soc3 is not None:
                     for tr in [50, 20]:
@@ -200,7 +223,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sid = STATION_ID_3
         
     soc = get_battery_soc(sid)
-    if soc is None: await msg.edit_text("❌ Помилка отримання даних")
+    if soc is None:
+        await msg.edit_text("❌ Помилка отримання даних")
     else:
         icon = "🟢" if soc >= 50 else "🟡" if soc >= 20 else "🔴"
         await msg.edit_text(f"📍 <b>{text_btn}</b>\n{icon} Заряд: {soc}%", parse_mode="HTML")
